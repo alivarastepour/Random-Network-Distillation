@@ -670,6 +670,29 @@ class AtariEnvironment(Environment):
             self.history[i, :, :] = self.pre_proc(s)
 
 
+class EpsilonGreedyExploration:
+    def __init__(self, epsilon=0.1):
+        """
+        Initialize the epsilon-greedy exploration strategy.
+        :param epsilon: The probability of choosing a random action.
+        """
+        self.epsilon = epsilon
+
+    def select_action(self, policy_network_output, action_space):
+        """
+        Select an action based on epsilon-greedy strategy.
+        :param policy_network_output: Output of the policy network (action probabilities).
+        :param action_space: List or range of possible actions.
+        :return: Chosen action.
+        """
+        if np.random.rand() < self.epsilon:
+            # Exploration: Choose a random action
+            return np.random.choice(action_space)
+        else:
+            # Exploitation: Choose the action with the highest policy probability
+            return np.argmax(policy_network_output)
+
+
 def main():
     print({section: dict(config[section]) for section in config.sections()})
     train_method = default_config['TrainMethod']
@@ -798,19 +821,29 @@ def main():
             next_obs = []
     print('End to initialize...')
 
+    epsilon_greedy = EpsilonGreedyExploration(epsilon=0.1)
     while True:
         total_state, total_reward, total_done, total_next_state, total_action, total_int_reward, total_next_obs, total_ext_values, total_int_values, total_policy, total_policy_np = \
             [], [], [], [], [], [], [], [], [], [], []
         global_step += (num_worker * num_step)
         global_update += 1
 
+# Initialize the epsilon-greedy module with epsilon = 0.1 (or any value you want)
+
         # Step 1. n-step rollout
         for _ in range(num_step):
             actions, value_ext, value_int, policy = agent.get_action(np.float32(states) / 255.)
 
-            for parent_conn, action in zip(parent_conns, actions):
-                parent_conn.send(action)
-
+            if train_method == "RND":
+                for parent_conn, action in zip(parent_conns, actions):
+                    parent_conn.send(action)
+            elif train_method == "E-Greedy":
+                for i in range(num_worker):
+                    action = epsilon_greedy.select_action(policy[i].data.cpu().numpy(), range(output_size))
+                    parent_conns[i].send(action)
+            else:
+                raise NotImplementedError
+            
             next_states, rewards, dones, real_dones, log_rewards, next_obs = [], [], [], [], [], []
             for parent_conn in parent_conns:
                 s, r, d, rd, lr = parent_conn.recv()
@@ -1019,12 +1052,20 @@ def main1():
     rall = 0
     rd = False
     intrinsic_reward_list = []
+    epsilon_greedy = EpsilonGreedyExploration(epsilon=0.1)
     while not rd:
         steps += 1
         actions, value_ext, value_int, policy = agent.get_action(np.float32(states) / 255.)
 
-        for parent_conn, action in zip(parent_conns, actions):
-            parent_conn.send(action)
+        if train_method == "RND":
+            for parent_conn, action in zip(parent_conns, actions):
+                parent_conn.send(action)
+        elif train_method == "E-Greedy":
+            for i in range(num_worker):
+                action = epsilon_greedy.select_action(policy[i].data.cpu().numpy(), range(output_size))
+                parent_conns[i].send(action)
+        else:
+            raise NotImplementedError
 
         next_states, rewards, dones, real_dones, log_rewards, next_obs = [], [], [], [], [], []
         for parent_conn in parent_conns:
