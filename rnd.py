@@ -13,9 +13,6 @@ import cv2
 from abc import abstractmethod
 from collections import deque
 from copy import copy
-import gym_super_mario_bros
-from nes_py.wrappers import JoypadSpace as BinarySpaceToDiscreteSpaceEnv
-from gym_super_mario_bros.actions import SIMPLE_MOVEMENT, COMPLEX_MOVEMENT
 from torch.multiprocessing import Pipe, Process
 from PIL import Image
 import matplotlib.pyplot as plt
@@ -578,33 +575,6 @@ class MaxAndSkipEnv(gym.Wrapper):
         return a
 
 
-class MontezumaInfoWrapper(gym.Wrapper):
-    def __init__(self, env, room_address):
-        super(MontezumaInfoWrapper, self).__init__(env)
-        self.room_address = room_address
-        self.visited_rooms = set()
-
-    def get_current_room(self):
-        ram = unwrap(self.env).ale.getRAM()
-        assert len(ram) == 128
-        return int(ram[self.room_address])
-
-    def step(self, action):
-        obs, rew, done, info = self.env.step(action) # montezuma only
-        self.visited_rooms.add(self.get_current_room())
-
-        if 'episode' not in info:
-            info['episode'] = {}
-        info['episode'].update(visited_rooms=copy(self.visited_rooms))
-
-        if done:
-            self.visited_rooms.clear()
-        return obs, rew, done, info
-
-    def reset(self):
-        return self.env.reset()
-
-
 class AtariEnvironment(Environment):
     def __init__(
             self,
@@ -621,8 +591,6 @@ class AtariEnvironment(Environment):
         super(AtariEnvironment, self).__init__()
         self.daemon = True
         self.env = MaxAndSkipEnv(gym.make(env_id, render_mode='rgb_array'), is_render)
-        if 'Montezuma' in env_id:
-            self.env = MontezumaInfoWrapper(self.env, room_address=3 if 'Montezuma' in env_id else 1)
         self.env_id = env_id
         self.is_render = is_render
         self.env_idx = env_idx
@@ -702,154 +670,19 @@ class AtariEnvironment(Environment):
             self.history[i, :, :] = self.pre_proc(s)
 
 
-class MarioEnvironment(Process):
-    def __init__(
-            self,
-            env_id,
-            is_render,
-            env_idx,
-            child_conn,
-            history_size=4,
-            life_done=False,
-            h=84,
-            w=84, movement=COMPLEX_MOVEMENT, sticky_action=True,
-            p=0.25):
-        super(MarioEnvironment, self).__init__()
-        self.daemon = True
-        self.env = BinarySpaceToDiscreteSpaceEnv(
-            gym_super_mario_bros.make(env_id), COMPLEX_MOVEMENT)
-
-        self.is_render = is_render
-        self.env_idx = env_idx
-        self.steps = 0
-        self.episode = 0
-        self.rall = 0
-        self.recent_rlist = deque(maxlen=100)
-        self.child_conn = child_conn
-
-        self.life_done = life_done
-        self.sticky_action = sticky_action
-        self.last_action = 0
-        self.p = p
-
-        self.history_size = history_size
-        self.history = np.zeros([history_size, h, w])
-        self.h = h
-        self.w = w
-
-        self.reset()
-
-    def run(self):
-        super(MarioEnvironment, self).run()
-        while True:
-            action = self.child_conn.recv()
-            if self.is_render:
-                res = self.env.render(mode='rgb_array')
-                print("res is ", res)
-
-            # sticky action
-            if self.sticky_action:
-                if np.random.rand() <= self.p:
-                    action = self.last_action
-                self.last_action = action
-
-            # 4 frame skip
-            reward = 0.0
-            done = None
-            for i in range(4):
-                obs, r, done, info = self.env.step(action) # mario
-                if self.is_render:
-                    res = self.env.render(mode='rgb_array')
-                    print("res is ", res)
-                reward += r
-                if done:
-                    break
-
-            # when Mario loses life, changes the state to the terminal
-            # state.
-            if self.life_done:
-                if self.lives > info['life'] and info['life'] > 0:
-                    force_done = True
-                    self.lives = info['life']
-                else:
-                    force_done = done
-                    self.lives = info['life']
-            else:
-                force_done = done
-
-            # reward range -15 ~ 15
-            log_reward = reward / 15
-            self.rall += log_reward
-
-            r = int(info.get('flag_get', False))
-
-            self.history[:3, :, :] = self.history[1:, :, :]
-            self.history[3, :, :] = self.pre_proc(obs)
-
-            self.steps += 1
-
-            if done:
-                self.recent_rlist.append(self.rall)
-                print(
-                    "[Episode {}({})] Step: {}  Reward: {}  Recent Reward: {}  Stage: {} current x:{}   max x:{}".format(
-                        self.episode,
-                        self.env_idx,
-                        self.steps,
-                        self.rall,
-                        np.mean(
-                            self.recent_rlist),
-                        info['stage'],
-                        info['x_pos'],
-                        self.max_pos))
-
-                self.history = self.reset()
-
-            self.child_conn.send([self.history[:, :, :], r, force_done, done, log_reward])
-
-    def reset(self):
-        self.last_action = 0
-        self.steps = 0
-        self.episode += 1
-        self.rall = 0
-        self.lives = 3
-        self.stage = 1
-        self.max_pos = 0
-        self.get_init_state(self.env.reset())
-        return self.history[:, :, :]
-
-    def pre_proc(self, X):
-        # grayscaling
-        x = cv2.cvtColor(X, cv2.COLOR_RGB2GRAY)
-        # resize
-        x = cv2.resize(x, (self.h, self.w))
-
-        return x
-
-    def get_init_state(self, s):
-        for i in range(self.history_size):
-            self.history[i, :, :] = self.pre_proc(s)
-
-
-
-
-
 def main():
     print({section: dict(config[section]) for section in config.sections()})
     train_method = default_config['TrainMethod']
     env_id = default_config['EnvID']
+
     env_type = default_config['EnvType']
-
-    if env_type == 'mario':
-        env = BinarySpaceToDiscreteSpaceEnv(gym_super_mario_bros.make(env_id), COMPLEX_MOVEMENT)
-    elif env_type == 'atari':
-        env = gym.make(env_id)
-    else:
+    if env_type != 'atari':
         raise NotImplementedError
-    input_size = env.observation_space.shape  # 4
-    output_size = env.action_space.n  # 2
 
-    if 'Breakout' in env_id:
-        output_size -= 1
+    env = gym.make(env_id)
+
+    input_size = env.observation_space.shape
+    output_size = env.action_space.n
 
     env.close()
 
@@ -864,12 +697,9 @@ def main():
     use_cuda = default_config.getboolean('UseGPU')
     use_gae = default_config.getboolean('UseGAE')
     use_noisy_net = default_config.getboolean('UseNoisyNet')
-
     lam = float(default_config['Lambda'])
     num_worker = int(default_config['NumEnv'])
-
     num_step = int(default_config['NumStep'])
-
     ppo_eps = float(default_config['PPOEps'])
     epoch = int(default_config['Epoch'])
     mini_batch = int(default_config['MiniBatch'])
@@ -881,7 +711,6 @@ def main():
     clip_grad_norm = float(default_config['ClipGradNorm'])
     ext_coef = float(default_config['ExtCoef'])
     int_coef = float(default_config['IntCoef'])
-
     sticky_action = default_config.getboolean('StickyAction')
     action_prob = float(default_config['ActionProb'])
     life_done = default_config.getboolean('LifeDone')
@@ -895,8 +724,6 @@ def main():
 
     if default_config['EnvType'] == 'atari':
         env_type = AtariEnvironment
-    elif default_config['EnvType'] == 'mario':
-        env_type = MarioEnvironment
     else:
         raise NotImplementedError
 
@@ -953,7 +780,7 @@ def main():
     global_step = 0
 
     # normalize obs
-    print('Start to initailize observation normalization parameter.....')
+    print('Start to initialize observation normalization parameter.....')
     next_obs = []
     for step in range(num_step * pre_obs_norm_step):
         actions = np.random.randint(0, output_size, size=(num_worker,))
@@ -969,7 +796,7 @@ def main():
             next_obs = np.stack(next_obs)
             obs_rms.update(next_obs)
             next_obs = []
-    print('End to initalize...')
+    print('End to initialize...')
 
     while True:
         total_state, total_reward, total_done, total_next_state, total_action, total_int_reward, total_next_obs, total_ext_values, total_int_values, total_policy, total_policy_np = \
@@ -1109,35 +936,24 @@ def main1():
     print({section: dict(config[section]) for section in config.sections()})
     env_id = default_config['EnvID']
     env_type = default_config['EnvType']
-
-    if env_type == 'mario':
-        env = BinarySpaceToDiscreteSpaceEnv(gym_super_mario_bros.make(env_id), COMPLEX_MOVEMENT)
-    elif env_type == 'atari':
-        env = gym.make(env_id)
-    else:
+    if env_type != 'atari':
         raise NotImplementedError
-    input_size = env.observation_space.shape  # 4
-    output_size = env.action_space.n  # 2
-
-    if 'Breakout' in env_id:
-        output_size -= 1
-
+    
+    env = gym.make(env_id)
+    input_size = env.observation_space.shape 
+    output_size = env.action_space.n 
     env.close()
 
     is_render = True
     model_path = 'models/{}.model'.format(env_id)
     predictor_path = 'models/{}.pred'.format(env_id)
     target_path = 'models/{}.target'.format(env_id)
-
     use_cuda = False
     use_gae = default_config.getboolean('UseGAE')
     use_noisy_net = default_config.getboolean('UseNoisyNet')
-
     lam = float(default_config['Lambda'])
     num_worker = 1
-
     num_step = int(default_config['NumStep'])
-
     ppo_eps = float(default_config['PPOEps'])
     epoch = int(default_config['Epoch'])
     mini_batch = int(default_config['MiniBatch'])
@@ -1146,17 +962,13 @@ def main1():
     entropy_coef = float(default_config['Entropy'])
     gamma = float(default_config['Gamma'])
     clip_grad_norm = float(default_config['ClipGradNorm'])
-
     sticky_action = False
     action_prob = float(default_config['ActionProb'])
     life_done = default_config.getboolean('LifeDone')
-
     agent = RNDAgent
 
     if default_config['EnvType'] == 'atari':
         env_type = AtariEnvironment
-    elif default_config['EnvType'] == 'mario':
-        env_type = MarioEnvironment
     else:
         raise NotImplementedError
 
@@ -1237,7 +1049,7 @@ def main1():
     return works[0]
 
 
-if __name__ == "__naim__":
+if __name__ == "_main__":
     main()
    
 if __name__ == "__main__":
