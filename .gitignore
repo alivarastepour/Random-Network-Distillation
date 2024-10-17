@@ -1,0 +1,14 @@
+# models
+/models
+
+# runs
+/runs
+
+# virtual environment
+/venv
+
+# generated snapshots
+*.mp4
+
+# metadata
+int_reward
