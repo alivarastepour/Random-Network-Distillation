@@ -660,7 +660,7 @@ class AtariEnvironment(Environment):
             self.pre_proc(s))
         return self.history[:, :, :]
 
-    def pre_proc(self, X):
+    def pre_proc(self, X):  
         X = np.array(Image.fromarray(X).convert('L')).astype('float32')
         x = cv2.resize(X, (self.h, self.w))
         return x
@@ -1085,23 +1085,24 @@ def main1():
             with open('int_reward', 'wb') as f:
                 pickle.dump(intrinsic_reward_list, f)
             steps = 0
-            rall = 0
+            rall = 0    
 
     return works[0]
 
 
-if __name__ == "_main__":
+if __name__ == "__main__":
     main()
    
-if __name__ == "__main__":
+if __name__ == "_main__":
     env = main1()
     # Example: list of arrays (each array is a 3-channel image)
     snapshots = frames
-    # print("is ", frames)
+
+    print("is ", len(frames))
     # Define the codec and create a VideoWriter object to save the video
     height, width, layers = snapshots[0].shape
     print(height, width, layers)
-    video = cv2.VideoWriter('output_video.mp4', cv2.VideoWriter_fourcc(*'mp4v'), 10, (width, height))
+    video = cv2.VideoWriter('output_video.mp4', cv2.VideoWriter_fourcc(*'mp4v'), 60, (width, height))
 
     # Write each frame to the video
     for snapshot in snapshots:

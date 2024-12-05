@@ -1,4 +1,4 @@
-ale-py==0.7.5
+ale-py==0.10.1
 AutoROM==0.4.2
 AutoROM.accept-rom-license==0.6.1
 certifi==2024.8.30
