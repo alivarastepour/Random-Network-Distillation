@@ -18,7 +18,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from tensorboardX import SummaryWriter
 import pickle
-
+import os
 manager = Manager()
 frames = manager.list()
 
@@ -29,7 +29,7 @@ default_config = config[default]
 use_gae = default_config.getboolean('UseGAE')
 lam = float(default_config['Lambda'])
 train_method = default_config['TrainMethod']
-
+label = "RND" if default_config['TrainMethod'] == "RND" else "EP";
 
 def make_train_data(reward, done, value, gamma, num_step, num_worker):
     discounted_return = np.empty([num_worker, num_step])
@@ -641,10 +641,6 @@ class AtariEnvironment(Environment):
 
             if done:
                 self.recent_rlist.append(self.rall)
-                print("[Episode {}({})] Step: {}  Reward: {}  Recent Reward: {}  Visited Room: [{}]".format(
-                    self.episode, self.env_idx, self.steps, self.rall, np.mean(self.recent_rlist),
-                    info.get('episode', {}).get('visited_rooms', {})))
-
                 self.history = self.reset()
 
             self.child_conn.send(
@@ -660,10 +656,33 @@ class AtariEnvironment(Environment):
             self.pre_proc(s))
         return self.history[:, :, :]
 
-    def pre_proc(self, X):  
+    def pre_proc_orignal(self, X):  
+
         X = np.array(Image.fromarray(X).convert('L')).astype('float32')
         x = cv2.resize(X, (self.h, self.w))
         return x
+    
+    def pre_proc(self,X):
+        os.makedirs("images", exist_ok=True)
+
+        # Save the original image
+        original_image_path = f"images/original_image_{self.steps}.png"
+        X = X.astype(np.uint8)
+        Image.fromarray(X).save(original_image_path)
+
+        # Convert to gray-scale and save
+        gray_image = Image.fromarray(X).convert('L')
+        gray_image_path = f"images/gray_image_{self.steps}.png"
+        gray_image.save(gray_image_path)
+
+        # Resize the image and save
+        gray_array = np.array(gray_image).astype('float32')
+        resized_image = cv2.resize(gray_array, (self.h, self.w))
+        resized_image_path = f"images/resized_image_{self.steps}.png"
+        cv2.imwrite(resized_image_path, resized_image)
+
+        # Return the resized image for further processing
+        return resized_image
 
     def get_init_state(self, s):
         for i in range(self.history_size):
@@ -715,7 +734,7 @@ def main():
     predictor_path = 'models/{}.pred'.format(env_id)
     target_path = 'models/{}.target'.format(env_id)
 
-    writer = SummaryWriter()
+    writer = SummaryWriter("artifacts/runs")
 
     use_cuda = default_config.getboolean('UseGPU')
     use_gae = default_config.getboolean('UseGAE')
@@ -884,9 +903,8 @@ def main():
             sample_step += 1
             if real_dones[sample_env_idx]:
                 sample_episode += 1
-                writer.add_scalar('data/reward_per_epi', sample_rall, sample_episode)
-                writer.add_scalar('data/reward_per_rollout', sample_rall, global_update)
-                writer.add_scalar('data/step', sample_step, sample_episode)
+                writer.add_scalar(f'{label}_reward_per_rollout', sample_rall, global_update)
+                writer.add_scalar(f'{label}_data', sample_step, sample_episode)
                 sample_rall = 0
                 sample_step = 0
                 sample_i_rall = 0
@@ -916,12 +934,10 @@ def main():
 
         # normalize intrinsic reward
         total_int_reward /= np.sqrt(reward_rms.var)
-        writer.add_scalar('data/int_reward_per_epi', np.sum(total_int_reward) / num_worker, sample_episode)
-        writer.add_scalar('data/int_reward_per_rollout', np.sum(total_int_reward) / num_worker, global_update)
         # -------------------------------------------------------------------------------------------
 
         # logging Max action probability
-        writer.add_scalar('data/max_prob', softmax(total_logging_policy).max(1).mean(), sample_episode)
+        writer.add_scalar(f'{label}_max_prob', softmax(total_logging_policy).max(1).mean(), sample_episode)
 
         # Step 3. make target and advantage
         # extrinsic reward calculate
@@ -1082,7 +1098,7 @@ def main1():
         if rd:
             intrinsic_reward_list = (intrinsic_reward_list - np.mean(intrinsic_reward_list)) / np.std(
                 intrinsic_reward_list)
-            with open('int_reward', 'wb') as f:
+            with open('artifacts/int_reward', 'wb') as f:
                 pickle.dump(intrinsic_reward_list, f)
             steps = 0
             rall = 0    
