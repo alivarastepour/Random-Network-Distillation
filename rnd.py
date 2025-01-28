@@ -18,7 +18,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from tensorboardX import SummaryWriter
 import pickle
-
+import os
 manager = Manager()
 frames = manager.list()
 
@@ -29,7 +29,7 @@ default_config = config[default]
 use_gae = default_config.getboolean('UseGAE')
 lam = float(default_config['Lambda'])
 train_method = default_config['TrainMethod']
-
+label = "RND" if default_config['TrainMethod'] == "RND" else "EP";
 
 def make_train_data(reward, done, value, gamma, num_step, num_worker):
     discounted_return = np.empty([num_worker, num_step])
@@ -641,10 +641,6 @@ class AtariEnvironment(Environment):
 
             if done:
                 self.recent_rlist.append(self.rall)
-                print("[Episode {}({})] Step: {}  Reward: {}  Recent Reward: {}  Visited Room: [{}]".format(
-                    self.episode, self.env_idx, self.steps, self.rall, np.mean(self.recent_rlist),
-                    info.get('episode', {}).get('visited_rooms', {})))
-
                 self.history = self.reset()
 
             self.child_conn.send(
@@ -660,14 +656,60 @@ class AtariEnvironment(Environment):
             self.pre_proc(s))
         return self.history[:, :, :]
 
-    def pre_proc(self, X):
+    def pre_proc_orignal(self, X):  
+
         X = np.array(Image.fromarray(X).convert('L')).astype('float32')
         x = cv2.resize(X, (self.h, self.w))
         return x
+    
+    def pre_proc(self,X):
+        os.makedirs("images", exist_ok=True)
+
+        # Save the original image
+        original_image_path = f"images/original_image_{self.steps}.png"
+        X = X.astype(np.uint8)
+        Image.fromarray(X).save(original_image_path)
+
+        # Convert to gray-scale and save
+        gray_image = Image.fromarray(X).convert('L')
+        gray_image_path = f"images/gray_image_{self.steps}.png"
+        gray_image.save(gray_image_path)
+
+        # Resize the image and save
+        gray_array = np.array(gray_image).astype('float32')
+        resized_image = cv2.resize(gray_array, (self.h, self.w))
+        resized_image_path = f"images/resized_image_{self.steps}.png"
+        cv2.imwrite(resized_image_path, resized_image)
+
+        # Return the resized image for further processing
+        return resized_image
 
     def get_init_state(self, s):
         for i in range(self.history_size):
             self.history[i, :, :] = self.pre_proc(s)
+
+
+class EpsilonGreedyExploration:
+    def __init__(self, epsilon=0.1):
+        """
+        Initialize the epsilon-greedy exploration strategy.
+        :param epsilon: The probability of choosing a random action.
+        """
+        self.epsilon = epsilon
+
+    def select_action(self, policy_network_output, action_space):
+        """
+        Select an action based on epsilon-greedy strategy.
+        :param policy_network_output: Output of the policy network (action probabilities).
+        :param action_space: List or range of possible actions.
+        :return: Chosen action.
+        """
+        if np.random.rand() < self.epsilon:
+            # Exploration: Choose a random action
+            return np.random.choice(action_space)
+        else:
+            # Exploitation: Choose the action with the highest policy probability
+            return np.argmax(policy_network_output)
 
 
 def main():
@@ -692,7 +734,7 @@ def main():
     predictor_path = 'models/{}.pred'.format(env_id)
     target_path = 'models/{}.target'.format(env_id)
 
-    writer = SummaryWriter()
+    writer = SummaryWriter("artifacts/runs")
 
     use_cuda = default_config.getboolean('UseGPU')
     use_gae = default_config.getboolean('UseGAE')
@@ -798,19 +840,29 @@ def main():
             next_obs = []
     print('End to initialize...')
 
+    epsilon_greedy = EpsilonGreedyExploration(epsilon=0.1)
     while True:
         total_state, total_reward, total_done, total_next_state, total_action, total_int_reward, total_next_obs, total_ext_values, total_int_values, total_policy, total_policy_np = \
             [], [], [], [], [], [], [], [], [], [], []
         global_step += (num_worker * num_step)
         global_update += 1
 
+# Initialize the epsilon-greedy module with epsilon = 0.1 (or any value you want)
+
         # Step 1. n-step rollout
         for _ in range(num_step):
             actions, value_ext, value_int, policy = agent.get_action(np.float32(states) / 255.)
 
-            for parent_conn, action in zip(parent_conns, actions):
-                parent_conn.send(action)
-
+            if train_method == "RND":
+                for parent_conn, action in zip(parent_conns, actions):
+                    parent_conn.send(action)
+            elif train_method == "E-Greedy":
+                for i in range(num_worker):
+                    action = epsilon_greedy.select_action(policy[i].data.cpu().numpy(), range(output_size))
+                    parent_conns[i].send(action)
+            else:
+                raise NotImplementedError
+            
             next_states, rewards, dones, real_dones, log_rewards, next_obs = [], [], [], [], [], []
             for parent_conn in parent_conns:
                 s, r, d, rd, lr = parent_conn.recv()
@@ -851,9 +903,8 @@ def main():
             sample_step += 1
             if real_dones[sample_env_idx]:
                 sample_episode += 1
-                writer.add_scalar('data/reward_per_epi', sample_rall, sample_episode)
-                writer.add_scalar('data/reward_per_rollout', sample_rall, global_update)
-                writer.add_scalar('data/step', sample_step, sample_episode)
+                writer.add_scalar(f'{label}_reward_per_rollout', sample_rall, global_update)
+                writer.add_scalar(f'{label}_data', sample_step, sample_episode)
                 sample_rall = 0
                 sample_step = 0
                 sample_i_rall = 0
@@ -883,12 +934,10 @@ def main():
 
         # normalize intrinsic reward
         total_int_reward /= np.sqrt(reward_rms.var)
-        writer.add_scalar('data/int_reward_per_epi', np.sum(total_int_reward) / num_worker, sample_episode)
-        writer.add_scalar('data/int_reward_per_rollout', np.sum(total_int_reward) / num_worker, global_update)
         # -------------------------------------------------------------------------------------------
 
         # logging Max action probability
-        writer.add_scalar('data/max_prob', softmax(total_logging_policy).max(1).mean(), sample_episode)
+        writer.add_scalar(f'{label}_max_prob', softmax(total_logging_policy).max(1).mean(), sample_episode)
 
         # Step 3. make target and advantage
         # extrinsic reward calculate
@@ -1019,12 +1068,20 @@ def main1():
     rall = 0
     rd = False
     intrinsic_reward_list = []
+    epsilon_greedy = EpsilonGreedyExploration(epsilon=0.1)
     while not rd:
         steps += 1
         actions, value_ext, value_int, policy = agent.get_action(np.float32(states) / 255.)
 
-        for parent_conn, action in zip(parent_conns, actions):
-            parent_conn.send(action)
+        if train_method == "RND":
+            for parent_conn, action in zip(parent_conns, actions):
+                parent_conn.send(action)
+        elif train_method == "E-Greedy":
+            for i in range(num_worker):
+                action = epsilon_greedy.select_action(policy[i].data.cpu().numpy(), range(output_size))
+                parent_conns[i].send(action)
+        else:
+            raise NotImplementedError
 
         next_states, rewards, dones, real_dones, log_rewards, next_obs = [], [], [], [], [], []
         for parent_conn in parent_conns:
@@ -1041,26 +1098,27 @@ def main1():
         if rd:
             intrinsic_reward_list = (intrinsic_reward_list - np.mean(intrinsic_reward_list)) / np.std(
                 intrinsic_reward_list)
-            with open('int_reward', 'wb') as f:
+            with open('artifacts/int_reward', 'wb') as f:
                 pickle.dump(intrinsic_reward_list, f)
             steps = 0
-            rall = 0
+            rall = 0    
 
     return works[0]
 
 
-if __name__ == "_main__":
+if __name__ == "__main__":
     main()
    
-if __name__ == "__main__":
+if __name__ == "_main__":
     env = main1()
     # Example: list of arrays (each array is a 3-channel image)
     snapshots = frames
-    # print("is ", frames)
+
+    print("is ", len(frames))
     # Define the codec and create a VideoWriter object to save the video
     height, width, layers = snapshots[0].shape
     print(height, width, layers)
-    video = cv2.VideoWriter('output_video.mp4', cv2.VideoWriter_fourcc(*'mp4v'), 10, (width, height))
+    video = cv2.VideoWriter('output_video.mp4', cv2.VideoWriter_fourcc(*'mp4v'), 60, (width, height))
 
     # Write each frame to the video
     for snapshot in snapshots:
