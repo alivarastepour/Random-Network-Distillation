@@ -22,3 +22,6 @@ Ensure you have the following installed:
 
 ## Hyperparameter Configuration
 Edit the `config.conf` file to modify the training parameters. For a complete list of settings, refer to the config.conf file.
+
+## Acknowledgment
+RND implementation is derived from [this source](https://github.com/jcwleo/random-network-distillation-pytorch)
